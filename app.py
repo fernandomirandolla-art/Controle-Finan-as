@@ -29,46 +29,49 @@ if check_password():
     st.title("📊 Meu Dashboard Financeiro")
 
     # --- LER DADOS DA PLANILHA (Histórico) ---
-    @st.cache_data(ttl=60) # Atualiza automaticamente a cada 1 minuto
+    @st.cache_data(ttl=60)
     def carregar_dados():
-        # Link especial que baixa a aba "Base Mês"
         url = "https://docs.google.com/spreadsheets/d/1EEVo7R_OlvVnHLBE2kfzGc2LuES-DEdY-v5V9gkHDJw/export?format=csv&gid=0"
         df = pd.read_csv(url)
         
-        # Ajusta o nome da coluna de cartão
         if 'Cartão Usado' in df.columns:
             df = df.rename(columns={'Cartão Usado': 'Cartão'})
             
-        # Limpa o "R$" e arruma a formatação de dinheiro brasileiro para o gráfico entender
         df['Valor'] = df['Valor'].astype(str).str.replace("R$", "", regex=False)
         df['Valor'] = df['Valor'].str.replace(" ", "", regex=False)
         df['Valor'] = df['Valor'].str.replace(".", "", regex=False)
         df['Valor'] = df['Valor'].str.replace(",", ".", regex=False)
         df['Valor'] = pd.to_numeric(df['Valor'], errors='coerce')
         
-        # Converte a coluna Data
         df['Data'] = pd.to_datetime(df['Data'], format='%d/%m/%Y', errors='coerce')
         
-        # Aplica a REGRA DO DIA 15 (Fechamento)
-        def calcular_mes_fechamento(data_compra):
+        # REGRA CORRIGIDA: Pix/Débito no mês exato, Cartão com regra do dia 15
+        def calcular_mes_fechamento(row):
+            data_compra = row['Data']
+            pagamento = str(row['Pagamento']).strip()
+            
             if pd.isnull(data_compra):
                 return "Indefinido"
-            if data_compra.day >= 15:
-                mes = data_compra.month + 1 if data_compra.month < 12 else 1
-                ano = data_compra.year if data_compra.month < 12 else data_compra.year + 1
-            else:
+                
+            # Se for Pix/Debito, o gasto entra no mês exato em que ocorreu
+            if pagamento == "Pix/Debito":
                 mes = data_compra.month
                 ano = data_compra.year
+            # Se for Cartão de Crédito, compras a partir do dia 15 caem na fatura do mês seguinte
+            else:
+                if data_compra.day >= 15:
+                    mes = data_compra.month + 1 if data_compra.month < 12 else 1
+                    ano = data_compra.year if data_compra.month < 12 else data_compra.year + 1
+                else:
+                    mes = data_compra.month
+                    ano = data_compra.year
             return f"{mes:02d}/{ano}"
 
-        df['Mês Fechamento'] = df['Data'].apply(calcular_mes_fechamento)
+        df['Mês Fechamento'] = df.apply(calcular_mes_fechamento, axis=1)
         df['Data'] = df['Data'].dt.date
-        
-        # Remove eventuais linhas em branco
         df = df.dropna(subset=['Valor'])
         return df
 
-    # Tenta carregar o histórico
     try:
         if 'dados_carregados' not in st.session_state:
             st.session_state.gastos = carregar_dados()
@@ -79,7 +82,7 @@ if check_password():
 
     # --- TELA DE CADASTRO (Aviso) ---
     with st.expander("➕ Cadastrar Novo Gasto (Temporário - Não salva no Google Sheets)", expanded=False):
-        st.warning("⚠️ Os gastos salvos aqui aparecem no gráfico apenas para simulação. Eles não são enviados para sua planilha do Excel ainda.")
+        st.warning("⚠️ Os gastos salvos aqui aparecem no gráfico apenas para simulação.")
         col1, col2, col3 = st.columns(3)
         with col1:
             data_input = st.date_input("Data da Compra", date.today())
@@ -92,7 +95,11 @@ if check_password():
             cartao_input = st.selectbox("Cartão Usado", ["Nubank", "BTG", "Nenhum (Pix)"])
         
         if st.button("Salvar na Visualização", type="primary"):
-            novo_mes = f"{data_input.month + 1 if data_input.day >= 15 else data_input.month:02d}/{data_input.year}"
+            if pagamento_input == "Pix/Debito":
+                novo_mes = f"{data_input.month:02d}/{data_input.year}"
+            else:
+                novo_mes = f"{data_input.month + 1 if data_input.day >= 15 else data_input.month:02d}/{data_input.year}"
+            
             novo_gasto = pd.DataFrame([{"Data": data_input, "Origem": origem_input, "Gasto": gasto_input, "Pagamento": pagamento_input, "Valor": valor_input, "Cartão": cartao_input, "Mês Fechamento": novo_mes}])
             st.session_state.gastos = pd.concat([st.session_state.gastos, novo_gasto], ignore_index=True)
             st.success("✅ Gasto incluído no Dashboard atual!")
@@ -103,14 +110,22 @@ if check_password():
     if not st.session_state.gastos.empty:
         st.subheader("📈 Resumo e Gráficos do Seu Histórico")
         
-        # Filtro de Mês
-        meses_ordenados = sorted(st.session_state.gastos["Mês Fechamento"].unique(), reverse=True)
-        mes_selecionado = st.selectbox("📅 Selecione o Mês da Fatura para Visualizar", meses_ordenados)
+        # Filtros Lado a Lado
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            meses_ordenados = sorted(st.session_state.gastos["Mês Fechamento"].unique(), reverse=True)
+            mes_selecionado = st.selectbox("📅 Selecione o Mês (Fatura/Competência)", meses_ordenados)
+        with col_f2:
+            tipos_pagamento = ["Todos"] + list(st.session_state.gastos["Pagamento"].dropna().unique())
+            pagamento_selecionado = st.selectbox("💳 Filtrar por Pagamento", tipos_pagamento)
         
+        # Aplicando os filtros
         df_filtrado = st.session_state.gastos[st.session_state.gastos["Mês Fechamento"] == mes_selecionado]
+        if pagamento_selecionado != "Todos":
+            df_filtrado = df_filtrado[df_filtrado["Pagamento"] == pagamento_selecionado]
         
         # Total Gasto no Mês
-        st.metric("Total Gasto na Fatura Selecionada", f"R$ {df_filtrado['Valor'].sum():,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        st.metric(f"Total Gasto ({pagamento_selecionado})", f"R$ {df_filtrado['Valor'].sum():,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
         
         colA, colB = st.columns(2)
         with colA:
@@ -125,8 +140,7 @@ if check_password():
                 st.plotly_chart(fig_cartao, use_container_width=True)
                 
         # Tabela Detalhada
-        st.write("📋 **Detalhes dos Lançamentos da Fatura**")
-        # Formatar valor na tabela para o visual
+        st.write("📋 **Detalhes dos Lançamentos Filtrados**")
         df_visual = df_filtrado[["Data", "Origem", "Gasto", "Pagamento", "Cartão", "Valor"]].copy()
         df_visual["Valor"] = df_visual["Valor"].apply(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
         st.dataframe(df_visual, use_container_width=True, hide_index=True)
